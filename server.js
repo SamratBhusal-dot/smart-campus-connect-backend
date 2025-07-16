@@ -5,89 +5,91 @@ const jwt = require('jsonwebtoken'); // For JWT token generation
 const admin = require('firebase-admin'); // Firebase Admin SDK
 
 const app = express();
-const PORT = 5001; // This port is used internally on Render, but your server will be accessible on 443
+const PORT = 5001; // Ensure this matches the port in your frontend JavaScript files
 const SECRET_KEY = 'your_super_secret_key_for_jwt_signing_change_this_in_production_!'; // IMPORTANT: Use a strong, unique key!
 
 // --- Firebase Admin SDK Initialization ---
-// IMPORTANT: For production, load service account credentials from environment variables
-// for security reasons, rather than including the JSON file in your repository.
 try {
-    // Attempt to load the service account from an environment variable.
-    // This variable (FIREBASE_SERVICE_ACCOUNT_KEY_JSON) will hold the *entire JSON string*
-    // of your serviceAccountKey.json file, which you set on Render.
     const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_JSON;
 
     if (!serviceAccountJson) {
-        // If the environment variable is not set, throw an error to clearly indicate the problem.
         throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY_JSON environment variable is not set or is empty.');
     }
 
-    // Parse the JSON string from the environment variable into a JavaScript object.
     const serviceAccount = JSON.parse(serviceAccountJson);
 
-    // Initialize the Firebase Admin SDK with the parsed credentials.
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
     });
     console.log('Firebase Admin SDK initialized successfully.');
 } catch (error) {
-    // Log detailed error information if Firebase initialization fails.
     console.error('Failed to initialize Firebase Admin SDK.');
     console.error('Please ensure FIREBASE_SERVICE_ACCOUNT_KEY_JSON environment variable is set on Render and contains a valid JSON string.');
     console.error('Error details:', error.message);
-    // Exit the process as the server cannot function without Firebase access.
     process.exit(1);
 }
 
-const db = admin.firestore(); // Get a Firestore instance to interact with your database
+const db = admin.firestore(); // Get a Firestore instance
 
-// Middleware to parse JSON bodies from incoming requests
+// Middleware to parse JSON bodies
 app.use(express.json());
-// Enable CORS for all origins. This is crucial for local development where your frontend
-// and backend might be on different ports/origins. Restrict this in production.
+// Enable CORS for all origins (for development, restrict in production)
 app.use(cors());
+
+// --- JWT Authentication Middleware ---
+// This middleware will verify the JWT token for protected routes
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Extract token from "Bearer TOKEN"
+
+    if (!token) {
+        return res.status(401).json({ message: 'Access Denied: No token provided!' });
+    }
+
+    try {
+        // Verify the token using the SECRET_KEY
+        const verified = jwt.verify(token, SECRET_KEY);
+        req.user = verified; // Attach user payload (id, username, role) to the request object
+        next(); // Proceed to the next middleware/route handler
+    } catch (error) {
+        // If token verification fails (e.g., invalid, expired)
+        return res.status(403).json({ message: 'Access Denied: Invalid token!' });
+    }
+};
 
 // --- Authentication Routes ---
 
-// Registration Route: Handles new user sign-ups
+// Registration Route
 app.post('/api/auth/register', async (req, res) => {
     const { username, email, password } = req.body;
 
-    // Basic validation to ensure all required fields are provided
     if (!username || !email || !password) {
         return res.status(400).json({ error: 'All fields are required.' });
     }
 
     try {
-        // Check if username already exists in the Firestore 'users' collection
         const usersRef = db.collection('users');
         const usernameQuery = await usersRef.where('username', '==', username).get();
         if (!usernameQuery.empty) {
             return res.status(409).json({ error: 'Username already exists.' });
         }
 
-        // Check if email already exists in the Firestore 'users' collection
         const emailQuery = await usersRef.where('email', '==', email).get();
         if (!emailQuery.empty) {
             return res.status(409).json({ error: 'Email already registered.' });
         }
 
-        // Hash the user's password using bcrypt for security
-        // The '10' represents the salt rounds, determining the complexity of the hash.
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        // Add the new user's data to the 'users' collection in Firestore
-        // 'role' is set to 'student' by default.
-        // 'createdAt' uses a server timestamp for accurate creation time.
         const newUserRef = await usersRef.add({
             username,
             email,
             hashedPassword,
-            role: 'student', // Default role for new registrations
+            role: 'student',
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        console.log('New user registered successfully with Firestore ID:', newUserRef.id);
+        console.log('New user registered with ID:', newUserRef.id);
         res.status(201).json({ message: 'User registered successfully!', userId: newUserRef.id });
 
     } catch (error) {
@@ -96,44 +98,34 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// Login Route: Handles user authentication
+// Login Route
 app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
 
     try {
-        // Find the user by username in the Firestore 'users' collection
-        // .limit(1) ensures we only fetch one document even if multiple exist (though usernames should be unique)
         const usersRef = db.collection('users');
         const userQuery = await usersRef.where('username', '==', username).limit(1).get();
 
-        // If no user document is found with the given username
         if (userQuery.empty) {
             return res.status(400).json({ error: 'Invalid credentials.' });
         }
 
-        // Get the user data from the first (and only) document found
         const userDoc = userQuery.docs[0];
-        const user = userDoc.data(); // This contains username, email, hashedPassword, role, etc.
+        const user = userDoc.data();
 
-        // Compare the provided plain password with the stored hashed password using bcrypt
         const isMatch = await bcrypt.compare(password, user.hashedPassword);
 
-        // If passwords do not match
         if (!isMatch) {
             return res.status(400).json({ error: 'Invalid credentials.' });
         }
 
-        // If credentials are valid, generate a JSON Web Token (JWT)
-        // The token includes user ID, username, and role.
-        // It's signed with a SECRET_KEY and set to expire in 1 hour.
         const token = jwt.sign(
             { id: userDoc.id, username: user.username, role: user.role },
             SECRET_KEY,
             { expiresIn: '1h' }
         );
 
-        console.log('User logged in successfully:', user.username);
-        // Send back a success message, the JWT token, and basic user info (excluding password hash)
+        console.log('User logged in:', user.username);
         res.status(200).json({ message: 'Login successful!', token, user: { id: userDoc.id, username: user.username, email: user.email, role: user.role } });
 
     } catch (error) {
@@ -142,34 +134,93 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// --- Example Protected Route ---
-// This route demonstrates how to protect an endpoint using JWT verification.
-app.get('/api/protected', (req, res) => {
-    // Get the authorization header from the request
-    const authHeader = req.headers['authorization'];
-    // Extract the token (Bearer <token>)
-    const token = authHeader && authHeader.split(' ')[1];
+// --- Marketplace Routes (Protected by authenticateToken middleware) ---
 
-    // If no token is provided, deny access
-    if (!token) {
-        return res.status(401).json({ message: 'Access Denied: No token provided!' });
+// POST /api/listings: Create a new listing
+app.post('/api/listings', authenticateToken, async (req, res) => {
+    const { title, description, price, category } = req.body;
+    const sellerId = req.user.id; // Get seller ID from authenticated token
+    const sellerUsername = req.user.username; // Get seller username from authenticated token
+
+    if (!title || !description || !price || !category) {
+        return res.status(400).json({ error: 'All fields (title, description, price, category) are required.' });
+    }
+    if (isNaN(price) || parseFloat(price) <= 0) {
+        return res.status(400).json({ error: 'Price must be a positive number.' });
     }
 
     try {
-        // Verify the token using the SECRET_KEY
-        const verified = jwt.verify(token, SECRET_KEY);
-        // If verification is successful, attach the decoded user payload to the request object
-        req.user = verified;
-        // Send a success response with the protected data and user info
-        res.json({ message: 'Welcome to the protected route!', user: req.user });
+        const listingsRef = db.collection('listings');
+        const newListingRef = await listingsRef.add({
+            title,
+            description,
+            price: parseFloat(price), // Store price as a number
+            category,
+            sellerId,
+            sellerUsername, // Store username for easier display on frontend
+            status: 'available', // Default status
+            postedAt: admin.firestore.FieldValue.serverTimestamp() // Timestamp
+        });
+
+        console.log('New listing created with ID:', newListingRef.id);
+        res.status(201).json({ message: 'Listing created successfully!', listingId: newListingRef.id });
+
     } catch (error) {
-        // If token verification fails (e.g., invalid, expired), deny access
-        res.status(403).json({ message: 'Access Denied: Invalid token!' });
+        console.error('Error creating listing:', error);
+        res.status(500).json({ error: 'Server error during listing creation.' });
     }
 });
 
-// --- Server Start ---
-// Start the Express server and listen for incoming requests on the specified PORT.
+// GET /api/listings: Fetch all listings with optional search and filters
+app.get('/api/listings', authenticateToken, async (req, res) => {
+    const { search, category, minPrice, maxPrice } = req.query;
+
+    try {
+        let listingsRef = db.collection('listings');
+        let query = listingsRef;
+
+        // Apply filters based on query parameters
+        if (category && category !== 'All') {
+            query = query.where('category', '==', category);
+        }
+        if (minPrice) {
+            query = query.where('price', '>=', parseFloat(minPrice));
+        }
+        if (maxPrice) {
+            query = query.where('price', '<=', parseFloat(maxPrice));
+        }
+
+        const snapshot = await query.get();
+        let listings = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        // Manual search filtering for title/description (Firestore doesn't support full-text search directly)
+        if (search) {
+            const searchTermLower = search.toLowerCase();
+            listings = listings.filter(listing =>
+                listing.title.toLowerCase().includes(searchTermLower) ||
+                listing.description.toLowerCase().includes(searchTermLower)
+            );
+        }
+
+        // Sort by postedAt, newest first (optional, can be done client-side if needed)
+        listings.sort((a, b) => b.postedAt.toDate() - a.postedAt.toDate());
+
+
+        res.status(200).json({ listings });
+
+    } catch (error) {
+        console.error('Error fetching listings:', error);
+        res.status(500).json({ error: 'Server error during fetching listings.' });
+    }
+});
+
+
+// Example protected route (requires token) - kept for demonstration
+app.get('/api/protected', authenticateToken, (req, res) => {
+    res.json({ message: 'Welcome to the protected route!', user: req.user });
+});
+
+// Start the server
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
 });
