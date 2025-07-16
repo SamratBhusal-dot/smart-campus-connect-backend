@@ -5,27 +5,37 @@ const jwt = require('jsonwebtoken'); // For JWT token generation
 const admin = require('firebase-admin'); // Firebase Admin SDK
 
 const app = express();
-const PORT = 5003; // Ensure this matches the port in your frontend JavaScript files
+const PORT = 5001; // This port is used internally on Render, but your server will be accessible on 443
 const SECRET_KEY = 'your_super_secret_key_for_jwt_signing_change_this_in_production_!'; // IMPORTANT: Use a strong, unique key!
 
 // --- Firebase Admin SDK Initialization ---
-// This block initializes the Firebase Admin SDK using your service account key.
-// It allows your Node.js backend to securely interact with Firebase services like Firestore.
+// IMPORTANT: For production, load service account credentials from environment variables
+// for security reasons, rather than including the JSON file in your repository.
 try {
-    // Attempt to load the service account key from the local file.
-    // In a production environment, you would typically load this from an environment variable
-    // for better security (e.g., process.env.FIREBASE_SERVICE_ACCOUNT_JSON).
-    const serviceAccount = require('./serviceAccountKey.json'); // Make sure this path is correct
+    // Attempt to load the service account from an environment variable.
+    // This variable (FIREBASE_SERVICE_ACCOUNT_KEY_JSON) will hold the *entire JSON string*
+    // of your serviceAccountKey.json file, which you set on Render.
+    const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_JSON;
 
+    if (!serviceAccountJson) {
+        // If the environment variable is not set, throw an error to clearly indicate the problem.
+        throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY_JSON environment variable is not set or is empty.');
+    }
+
+    // Parse the JSON string from the environment variable into a JavaScript object.
+    const serviceAccount = JSON.parse(serviceAccountJson);
+
+    // Initialize the Firebase Admin SDK with the parsed credentials.
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
     });
     console.log('Firebase Admin SDK initialized successfully.');
 } catch (error) {
+    // Log detailed error information if Firebase initialization fails.
     console.error('Failed to initialize Firebase Admin SDK.');
-    console.error('Please ensure "serviceAccountKey.json" is in your backend directory and is valid.');
+    console.error('Please ensure FIREBASE_SERVICE_ACCOUNT_KEY_JSON environment variable is set on Render and contains a valid JSON string.');
     console.error('Error details:', error.message);
-    // Exit the process if Firebase initialization fails, as the server won't function correctly.
+    // Exit the process as the server cannot function without Firebase access.
     process.exit(1);
 }
 
