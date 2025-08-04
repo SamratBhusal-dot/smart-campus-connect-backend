@@ -1,0 +1,6 @@
+@SmartCampusConnect_HostAddress = http://localhost:5212
+
+GET {{SmartCampusConnect_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
